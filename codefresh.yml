@@ -1,0 +1,222 @@
+version: '1.0'
+
+stages:
+  - prepare
+  - test
+  - integration
+  - publishing and build
+  - deploy to qa
+  - deploy to prod
+
+steps:
+  main_clone:
+    title: Cloning Main Repository...
+    stage: prepare
+    type: git-clone
+    repo: 'thiagolocatelli/spring-petclinic'
+    revision: '${{CF_REVISION}}'
+    git: github
+
+  devVersion:
+    title: Check develop version
+    stage: prepare
+    image: 'maven:3.5.2-jdk-8-alpine'
+    commands:
+      - echo DOCKER_IMAGE_TAG=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+      - echo DOCKER_CONTAINER_NAME=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+    when:
+      condition:
+        all:
+          isDevelopBranch: 'match("${{CF_BRANCH}}", "develop", true) == true'
+
+  releaseVersion:
+    title: Check release version
+    stage: prepare
+    image: 'maven:3.5.2-jdk-8-alpine'
+    commands:
+      - echo DOCKER_IMAGE_TAG=$(echo ${{CF_BRANCH}} | cut -d'/' -f 2)-RELEASE >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+      - echo DOCKER_CONTAINER_NAME=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+    when:
+      condition:
+        all:
+          isDevelopBranch: 'match("${{CF_BRANCH}}", "^release", true) == true'
+
+  PrintDockerTag:
+    title: Print Docker image Tag
+    stage: prepare
+    image: bash
+    commands:
+      - echo $DOCKER_IMAGE_TAG
+      - echo $DOCKER_CONTAINER_NAME
+    on_success:
+      annotations:
+        set:
+          - entity_id: default/spring-petclinic
+            entity_type: pipeline
+            annotations:
+              - docker_image_tag: ${{DOCKER_IMAGE_TAG}}
+              - commit_author: ${{CF_COMMIT_AUTHOR}}
+  UnitTests:
+    title: Compile/Unit tests
+    stage: test
+    image: 'maven:3.5.2-jdk-8-alpine'
+    commands:
+      - echo Junit
+      #- mvn -q Dmaven.repo.local=/codefresh/volume/m2_repository package
+
+  SonarQube:
+    title: SonarQube Analysis
+    stage: test
+    image: 'maven:3.5.2-jdk-8-alpine'
+    commands:
+      - echo SonarQube
+      # - mvn -q -Dmaven.repo.local=/codefresh/volume/m2_repository sonar:sonar
+
+  Integration:
+    title: Integration test
+    stage: test
+    image: maven:3.5.2-jdk-8-alpine
+    commands:
+      - echo Integration
+      #- mvn -q -Dmaven.repo.local=/codefresh/volume/m2_repository verify
+
+  VersioningArtifacts:
+    title: Versioning Artifacts
+    stage: publishing and build
+    image: maven:3.5.2-jdk-8-alpine
+    commands:
+      - mvn -q versions:set -DnewVersion=$DOCKER_IMAGE_TAG
+
+  PublishArtifacts:
+    title: Publish Artifacts to Nexus
+    stage: publishing and build
+    image: maven:3.5.2-jdk-8-alpine
+    commands:
+      - mvn -q -Dmaven.repo.local=/codefresh/volume/m2_repository clean package -DskipTests=true
+      - ls -la target/
+
+  BuildDockerImage:
+    title: Building Docker Image
+    type: build
+    stage: publishing and build
+    image_name: thiagolocatelli/spring-petclinic
+    working_directory: ./
+    tag: "${{DOCKER_IMAGE_TAG}}"
+    dockerfile: Dockerfile
+
+  dockerSecurityScan:
+    title: Security Scan
+    image: alpine:3.8
+    stage: publishing and build
+    commands:
+      - echo "Scanning docker image for vulnerabilities"
+
+  Push:
+    title: Pushing to Registry
+    type: push
+    stage: publishing and build
+    arguments:
+      candidate: '${{BuildDockerImage}}'
+      tag: "${{DOCKER_IMAGE_TAG}}"
+      image_name: thiagolocatelli/spring-petclinic
+      registry: dockerhub
+
+  notifyQAPendingApproval:
+    title: Notify Pending Approval
+    image: alpine:3.8
+    stage: deploy to qa
+    commands:
+      - echo "Pending Approval"
+    when:
+      condition:
+        all:
+          isDevelopBranch: 'match("${{CF_BRANCH}}", "develop", true) == true'
+
+  waitForInputBeforeQA:
+    type: pending-approval
+    title: Deploy to QA?
+    stage: deploy to qa
+    timeout:
+      duration: 2
+      finalState: denied
+    when:
+      condition:
+        all:
+          isDevelopBranch: 'match("${{CF_BRANCH}}", "develop", true) == true'
+
+  prepQaEnvNow:
+    title: Preparing deployment
+    image: alpine:3.8
+    stage: deploy to qa
+    commands:
+      - echo "Deploying to QA"
+    when:
+      steps:
+        - name: waitForInputBeforeQA
+          on:
+            - approved
+
+  deployQaEnvNow:
+    title: Deploying to QA
+    image: codefreshplugins/docker-service
+    stage: deploy to qa
+    commands:
+      - echo Deploying image ${{CF_REPO_OWNER}}/$DOCKER_CONTAINER_NAME:$DOCKER_IMAGE_TAG
+      - export DOCKER_HOST=$PROD_DOCKER_HOST
+      - docker container stop $DOCKER_CONTAINER_NAME-qa || true && docker container rm $DOCKER_CONTAINER_NAME || true
+      - docker run -d --name $DOCKER_CONTAINER_NAME-qa -e VIRTUAL_POST=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.dev -e SPRING_CLOUD_VAULT_URI=$QA_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$QA_VAULT_TOKEN thiagolocatelli/spring-petclinic:$DOCKER_IMAGE_TAG
+    when:
+      steps:
+        - name: waitForInputBeforeQA
+          on:
+            - approved
+
+  notifyProdPendingApproval:
+    title: Notify Pending Approval
+    image: alpine:3.8
+    stage: deploy to prod
+    commands:
+      - echo "Pending Approval"
+    when:
+      condition:
+        all:
+          isDevelopBranch: 'match("${{CF_BRANCH}}", "^release", true) == true'
+
+  waitForInputBeforeProduction:
+    type: pending-approval
+    title: Deploy to Production?
+    stage: deploy to prod
+    timeout:
+      duration: 2
+      finalState: denied
+    when:
+      condition:
+        all:
+          isDevelopBranch: 'match("${{CF_BRANCH}}", "^release", true) == true'
+
+  prepProdEnvNow:
+    title: Preparing deployment
+    image: alpine:3.8
+    stage: deploy to prod
+    commands:
+      - echo "Deploying to Production"
+    when:
+      steps:
+        - name: waitForInputBeforeProduction
+          on:
+            - approved
+
+  destroyProdEnvNow:
+    title: Deploying to Production
+    image: codefreshplugins/docker-service
+    stage: deploy to prod
+    commands:
+      - echo Deploying image ${{CF_REPO_OWNER}}/$DOCKER_CONTAINER_NAME:$DOCKER_IMAGE_TAG
+      - export DOCKER_HOST=$PROD_DOCKER_HOST
+      - docker container stop $DOCKER_CONTAINER_NAME-prod || true && docker container rm $DOCKER_CONTAINER_NAME || true
+      - docker run -d --name $DOCKER_CONTAINER_NAME-prod -e VIRTUAL_PORT=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_VAULT_URI=$PROD_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$PROD_VAULT_TOKEN thiagolocatelli/spring-petclinic:$DOCKER_IMAGE_TAG
+    when:
+      steps:
+        - name: waitForInputBeforeProduction
+          on:
+            - approved

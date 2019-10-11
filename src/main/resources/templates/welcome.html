@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+
+<html xmlns:th="https://www.thymeleaf.org" th:replace="~{fragments/layout :: layout (~{::body},'home')}">
+
+  <body>
+
+    <h1 th:text="#{welcome}">Welcome - Spring Boot Petclinic Demo</h1>
+    <div class="row">
+        <br/>
+        <br/>
+        <div class="col-md-12">
+            <h2>Application properties:</h2>
+            <br/>
+            <h3 th:text="${'demo.secret: ' + @displayMessagesConfiguration.getDemoSecret()}">Welcome</h3>
+            <h3 th:text="${'global.property: ' + @displayMessagesConfiguration.getGlobalMessage()}">Welcome</h3>
+            <h3 th:text="${'application.property: ' + @displayMessagesConfiguration.getApplicationMessage()}">Welcome</h3>
+
+            <br/><br/>
+            <img class="mx-auto d-block" th:src="@{/resources/images/pets.png}"/>
+        </div>
+
+        <!-- #650360 -->
+    </div>
+
+  </body>
+
+</html>

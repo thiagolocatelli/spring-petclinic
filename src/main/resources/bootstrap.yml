@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: spring-petclinic
+  cloud:
+    config:
+      fail-fast: false
+    vault:
+      fail-fast: false
+      token: TOKEN
+      uri: http://localhost:8200
+      connection-timeout: 5000
+      read-timeout: 15000
+      config:
+        order: -10
+      kv:
+        enabled: true
