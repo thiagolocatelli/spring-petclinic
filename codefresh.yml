@@ -1,5 +1,17 @@
-version: '1.0'
+# Variables ###################################
+# DEMO_DOCKER_HOST:
+# PROD_CONFIG_SERVER_URL:
+# PROD_VAULT_TOKEN:
+# PROD_VAULT_URL:
+# QA_CONFIG_SERVER_URL:
+# QA_VAULT_TOKEN:
+# SLACK_CICD_CHANNEL_WEBHOOK:
+# SLACK_PAYLOAD_APPROVAL:
+# SLACK_PAYLOAD_DEPLOY:
+# SONAR_TOKEN:
+# #############################################
 
+version: '1.0'
 stages:
   - prepare
   - test
@@ -9,7 +21,13 @@ stages:
   - deploy to prod
   
 steps:
-    
+  environment:
+    title: Environment
+    image: alpine:3.8
+    stage: prepare
+    commands:
+      - echo CF_REPO_OWNER='${{CF_REPO_OWNER}}' CF_REPO_NAME='${{CF_REPO_NAME}}' CF_REVISION='${{CF_REVISION}}'
+
   main_clone:
     title: Cloning Main Repository...
     stage: prepare
@@ -36,6 +54,7 @@ steps:
         image: 'maven:3.5.2-jdk-8-alpine'
         commands:
           - echo DOCKER_IMAGE_TAG=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+          - echo ARTIFACT_ID=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
           - echo DOCKER_CONTAINER_NAME=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec)-qa >> ${{CF_VOLUME_PATH}}/env_vars_to_export
         when:
           condition:
@@ -48,6 +67,7 @@ steps:
         image: 'maven:3.5.2-jdk-8-alpine'
         commands:
           - echo DOCKER_IMAGE_TAG=$(echo ${{CF_BRANCH}} | cut -d'/' -f 2)-RELEASE >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+          - echo ARTIFACT_ID=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
           - echo DOCKER_CONTAINER_NAME=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
         when:
           condition:
@@ -59,7 +79,7 @@ steps:
     stage: prepare
     image: bash
     commands:
-      - echo Build Version':'$DOCKER_IMAGE_TAG, Container Name':' $DOCKER_CONTAINER_NAME
+      - echo Build Version':'$DOCKER_IMAGE_TAG, Container Name':' $DOCKER_CONTAINER_NAME, Artifact Id':' $ARTIFACT_ID
     on_success: 
       annotations:
         set:
@@ -125,7 +145,7 @@ steps:
     title: Building Docker Image
     type: build
     stage: publishing and build
-    image_name: thiagolocatelli/spring-petclinic
+    image_name: "thiagolocatelli/${{ARTIFACT_ID}}"
     working_directory: ./
     tag: "${{DOCKER_IMAGE_TAG}}"
     dockerfile: Dockerfile
@@ -154,7 +174,7 @@ steps:
     arguments:
       candidate: '${{BuildDockerImage}}'
       tag: "${{DOCKER_IMAGE_TAG}}"
-      image_name: thiagolocatelli/spring-petclinic
+      image_name: "thiagolocatelli/${{ARTIFACT_ID}}"
       registry: dockerhub  
     when:
       condition:
@@ -205,7 +225,7 @@ steps:
       - echo Deploying image ${{CF_REPO_OWNER}}/$DOCKER_CONTAINER_NAME:$DOCKER_IMAGE_TAG
       - export DOCKER_HOST=$DEMO_DOCKER_HOST
       - docker container stop $DOCKER_CONTAINER_NAME || true && docker container rm $DOCKER_CONTAINER_NAME || true
-      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_POST=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$QA_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$QA_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$QA_VAULT_TOKEN thiagolocatelli/spring-petclinic:$DOCKER_IMAGE_TAG
+      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_POST=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$QA_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$QA_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$QA_VAULT_TOKEN thiagolocatelli/$ARTIFACT_ID:$DOCKER_IMAGE_TAG
     when:
       steps:
         - name: waitForInputBeforeQA
@@ -266,13 +286,13 @@ steps:
       - echo Deploying image ${{CF_REPO_OWNER}}/$DOCKER_CONTAINER_NAME:$DOCKER_IMAGE_TAG
       - export DOCKER_HOST=$DEMO_DOCKER_HOST
       - docker container stop $DOCKER_CONTAINER_NAME || true && docker container rm $DOCKER_CONTAINER_NAME || true
-      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_PORT=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$PROD_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$PROD_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$PROD_VAULT_TOKEN thiagolocatelli/spring-petclinic:$DOCKER_IMAGE_TAG
+      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_PORT=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$PROD_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$PROD_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$PROD_VAULT_TOKEN thiagolocatelli/$ARTIFACT_ID:$DOCKER_IMAGE_TAG
     when:
       steps:
         - name: waitForInputBeforeProduction
           on:
             - approved
-            
+
   slackNotifyProd:
     title: Notifiy Slack '#CICD'
     image: tutum/curl
@@ -282,4 +302,4 @@ steps:
     when:
       condition:
         all:
-          destroyProdEnvNowFinished: destroyProdEnvNow.result == 'success'            
+          destroyProdEnvNowFinished: destroyProdEnvNow.result == 'success'       
