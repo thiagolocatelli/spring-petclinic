@@ -1,0 +1,97 @@
+version: '1.0'
+
+stages:
+  - git and webhooks
+  - infra
+  - final
+
+steps:
+  environment:
+    title: Environment
+    image: alpine:3.8
+    stage: git and webhooks
+    commands:
+      - echo GITHUB_USER=${{GITHUB_USER}} GITHUB_USER_EMAIL=${{GITHUB_USER_EMAIL}} GITHUB_REPO=${{GITHUB_REPO}}
+      
+  createRepo:
+    title: Creating repo
+    stage: git and webhooks
+    image: alpine/httpie
+    commands:
+      - http -v POST https://api.github.com/repos/$GITHUB_USER/springboot-template-repo/generate owner=$GITHUB_USER name=$GITHUB_REPO description='This is your first repository created form a template' private:=true Authorization:"token $GITHUB_TOKEN" Accept:"application/vnd.github.baptiste-preview+json"
+      - export GITHUB_SHA=$(http https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/git/refs/heads Authorization:"token $GITHUB_TOKEN" | grep -Eo '"sha":.*?[^\\]",' | awk -F':' '{print $2}' | awk -F',' '{print $1}')
+      - cf_export GITHUB_SHA=$GITHUB_SHA
+      - http -v POST https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/git/refs ref="refs/heads/develop" sha=${GITHUB_SHA//\"} Authorization:"token $GITHUB_TOKEN"
+      - http PATCH https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO name=$GITHUB_REPO default_branch=develop  Authorization:"token $GITHUB_TOKEN"
+      - cf_export GITHUB_REPO=$GITHUB_REPO
+      
+  createInitialCode:
+    title: Creating initial code
+    stage: git and webhooks
+    image: prontotools/alpine-git-curl
+    commands:
+      - rm -rf $GITHUB_REPO/
+      - git clone https://$GITHUB_USER:$GITHUB_TOKEN@github.com/$GITHUB_USER/$GITHUB_REPO.git
+      - cd $GITHUB_REPO/
+      - curl 'https://start.spring.io/starter.zip?type=maven-project&language=java&bootVersion=2.1.9.RELEASE&baseDir=hello-world&groupId=com.ally.invest&artifactId=hello-world&name=hello-world&description=Demo%20project%20for%20Spring%20Boot&packageName=com.ally.invest.hello-world&packaging=jar&javaVersion=1.8&dependencies=actuator&dependencies=web' -o initial-code.zip
+      - unzip initial-code.zip && mv hello-world/* . && rm -rf hello-world
+      - git config --global user.email $GITHUB_USER_EMAIL
+      - git config --global user.name $GITHUB_USER
+      - git init && git add . && git commit -m "Initial Commit - Self Service for $GITHUB_USER"
+      - git push
+
+  addGitWebhooks:
+    title: Adding git webhooks
+    stage: git and webhooks
+    image: alpine/httpie
+    commands:
+      - http POST https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/hooks name=web active:=true events:='["push", "pull_request", "release"]' config:="$GITHUB_WEBHOOK_CONFIG" Authorization:"token $GITHUB_TOKEN"
+
+  exportWebHookId:
+    title: Export webhook id
+    stage: git and webhooks
+    image: alpine/httpie
+    commands:
+      - export WEBHOOK_ID=$(http https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/hooks Authorization:"token $GITHUB_TOKEN" | grep -Eo '"id":.*?[^\\]",' | awk -F':' '{print $2}' | awk -F',' '{print $1}')
+      - cf_export WEBHOOK_ID=$WEBHOOK_ID
+      
+  addCicdWebhooks:
+    title: Adding cicd webhooks
+    stage: git and webhooks
+    image: alpine/httpie
+    commands:
+      - echo '******* hello world *******'
+      
+  triggerInitialBuild:
+    title: Initial Build
+    stage: git and webhooks
+    image: alpine/httpie
+    commands:
+      - echo webhook id':' $WEBHOOK_ID
+      - http POST https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/hooks/$WEBHOOK_ID/tests Authorization:"token $GITHUB_TOKEN"
+      
+  addGrafanaDashboard:
+    title: Init Grafana Dashboard
+    stage: infra
+    image: alpine
+    commands:
+      - echo '******* hello world *******'
+      
+  parallelInfra:
+    type: parallel
+    stage: final
+    steps: 
+      updateJiraTicket:
+        title: Updating Jira Ticket
+        image: alpine/httpie
+        commands:
+          - echo '******* hello world *******'
+      notifySubmitter:
+        title: Notifying submitter
+        image: alpine/httpie
+        commands:
+          - echo GITHUB_USER=$GITHUB_USER && echo GITHUB_REPO=$GITHUB_REPO && echo GITHUB_SHA=$GITHUB_SHA
+          - export REPO_NAME=$GITHUB_USER/$GITHUB_REPO
+          - export REPO_URL=http://github.com/$GITHUB_USER/$GITHUB_REPO
+          - export REPO_SHA=${GITHUB_SHA//\"}
+          - http --form POST ${{SLACK_HOOK}} 'payload=${{SLACK_PAYLOAD}}'
