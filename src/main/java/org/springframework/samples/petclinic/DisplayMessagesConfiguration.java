@@ -9,7 +9,7 @@ public class DisplayMessagesConfiguration {
     @Value("${global.property:This is an global property coming from local}")
     private String globalMessage;
 
-    @Value("${global.property:This is an application property coming from local}")
+    @Value("${application.property:This is an application property coming from local}")
     private String applicationMessage;
 
     @Value("${demo.secret:This is a secret coming from local}")
