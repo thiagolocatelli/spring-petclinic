@@ -1,5 +1,17 @@
-version: '1.0'
+# Variables ###################################
+# TARGET_DOCKER_HOST: docker host where containers are deployed
+# PROD_CONFIG_SERVER_URL: spring cloud config server for prod
+# PROD_VAULT_TOKEN: vault token for prod
+# PROD_VAULT_URL: vault token url for prod
+# QA_CONFIG_SERVER_URL: spring cloud config server for qa
+# QA_VAULT_TOKEN: vautl token url for qa
+# SLACK_CICD_CHANNEL_WEBHOOK: slack cicd channel hook url
+# SLACK_PAYLOAD_APPROVAL: slack payload for approval message
+# SLACK_PAYLOAD_DEPLOY: slack payload for deploy message
+# SONAR_TOKEN: sonarqube authentication token
+# #############################################
 
+version: '1.0'
 stages:
   - prepare
   - test
@@ -9,7 +21,13 @@ stages:
   - deploy to prod
   
 steps:
-    
+  environment:
+    title: Environment
+    image: alpine:3.8
+    stage: prepare
+    commands:
+      - echo CF_REPO_OWNER='${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}' CF_REVISION='${{CF_REVISION}}'
+
   main_clone:
     title: Cloning Main Repository...
     stage: prepare
@@ -36,6 +54,7 @@ steps:
         image: 'maven:3.5.2-jdk-8-alpine'
         commands:
           - echo DOCKER_IMAGE_TAG=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+          - echo ARTIFACT_ID=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
           - echo DOCKER_CONTAINER_NAME=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec)-qa >> ${{CF_VOLUME_PATH}}/env_vars_to_export
         when:
           condition:
@@ -48,6 +67,7 @@ steps:
         image: 'maven:3.5.2-jdk-8-alpine'
         commands:
           - echo DOCKER_IMAGE_TAG=$(echo ${{CF_BRANCH}} | cut -d'/' -f 2)-RELEASE >> ${{CF_VOLUME_PATH}}/env_vars_to_export
+          - echo ARTIFACT_ID=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
           - echo DOCKER_CONTAINER_NAME=$(mvn -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive exec:exec) >> ${{CF_VOLUME_PATH}}/env_vars_to_export
         when:
           condition:
@@ -59,7 +79,7 @@ steps:
     stage: prepare
     image: bash
     commands:
-      - echo Build Version':'$DOCKER_IMAGE_TAG, Container Name':' $DOCKER_CONTAINER_NAME
+      - echo Build Version':'$DOCKER_IMAGE_TAG, Container Name':' $DOCKER_CONTAINER_NAME, Artifact Id':' $ARTIFACT_ID
     on_success: 
       annotations:
         set:
@@ -80,21 +100,21 @@ steps:
         image: 'maven:3.5.2-jdk-8-alpine'
         commands:
           - echo Junit
-          #- mvn -q Dmaven.repo.local=/codefresh/volume/m2_repository package
+          #- mvn -q Dmaven.repo.local=${{CF_VOLUME_PATH}}/.m2 package
 
       SonarQube:
         title: SonarQube Analysis
         image: 'maven:3.5.2-jdk-8-alpine'
         commands:
           - echo SonarQube
-         # - mvn -q -Dmaven.repo.local=/codefresh/volume/m2_repository sonar:sonar
+         # - mvn -q -Dmaven.repo.local=${{CF_VOLUME_PATH}}/.m2 sonar:sonar
 
       Integration:
         title: Integration test
         image: maven:3.5.2-jdk-8-alpine
         commands:
           - echo Integration
-          #- mvn -q -Dmaven.repo.local=/codefresh/volume/m2_repository verify
+          #- mvn -q -Dmaven.repo.local=${{CF_VOLUME_PATH}}/.m2 verify
      
   VersioningArtifacts:
     title: Versioning Artifacts
@@ -113,22 +133,24 @@ steps:
     stage: publishing and build
     image: maven:3.5.2-jdk-8-alpine
     commands:
-      - mvn -q -Dmaven.repo.local=/codefresh/volume/m2_repository clean package -DskipTests=true
-      - cat pom.xml
+      - rm -rf target/
+      - mvn -q -Dmaven.repo.local=${{CF_VOLUME_PATH}}/.m2 clean package -DskipTests=true
     when:
       condition:
         any:
           isDevelopBranch: 'match("${{CF_BRANCH}}", "^develop", true) == true'
-          isReleaseBranch: 'match("${{CF_BRANCH}}", "^release", true) == true'
-          
+          isReleaseBranch: 'match("${{CF_BRANCH}}", "^release", true) == true' 
+    
   BuildDockerImage:
     title: Building Docker Image
     type: build
     stage: publishing and build
-    image_name: thiagolocatelli/spring-petclinic
+    image_name: "thiagolocatelli/${{ARTIFACT_ID}}"
     working_directory: ./
     tag: "${{DOCKER_IMAGE_TAG}}"
     dockerfile: Dockerfile
+    no_cache: true
+    no_cf_cache: true
     when:
       condition:
         any:
@@ -153,8 +175,8 @@ steps:
     stage: publishing and build
     arguments:
       candidate: '${{BuildDockerImage}}'
-      tag: "${{DOCKER_IMAGE_TAG}}"
-      image_name: thiagolocatelli/spring-petclinic
+      image_name: 'thiagolocatelli/${{ARTIFACT_ID}}'
+      tag: '${{DOCKER_IMAGE_TAG}}'
       registry: dockerhub  
     when:
       condition:
@@ -203,9 +225,11 @@ steps:
     stage: deploy to qa
     commands:
       - echo Deploying image ${{CF_REPO_OWNER}}/$DOCKER_CONTAINER_NAME:$DOCKER_IMAGE_TAG
-      - export DOCKER_HOST=$DEMO_DOCKER_HOST
+      - export DOCKER_HOST=$TARGET_DOCKER_HOST
       - docker container stop $DOCKER_CONTAINER_NAME || true && docker container rm $DOCKER_CONTAINER_NAME || true
-      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_POST=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$QA_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$QA_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$QA_VAULT_TOKEN thiagolocatelli/spring-petclinic:$DOCKER_IMAGE_TAG
+      - docker image rm --force ${{CF_REPO_OWNER}}/$ARTIFACT_ID:$DOCKER_IMAGE_TAG
+      - docker image rm --force ${{CF_REPO_OWNER}}/$ARTIFACT_ID:latest
+      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_POST=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$QA_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$QA_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$QA_VAULT_TOKEN ${{CF_REPO_OWNER}}/$ARTIFACT_ID:$DOCKER_IMAGE_TAG
     when:
       steps:
         - name: waitForInputBeforeQA
@@ -264,15 +288,15 @@ steps:
     stage: deploy to prod
     commands:
       - echo Deploying image ${{CF_REPO_OWNER}}/$DOCKER_CONTAINER_NAME:$DOCKER_IMAGE_TAG
-      - export DOCKER_HOST=$DEMO_DOCKER_HOST
+      - export DOCKER_HOST=$TARGET_DOCKER_HOST
       - docker container stop $DOCKER_CONTAINER_NAME || true && docker container rm $DOCKER_CONTAINER_NAME || true
-      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_PORT=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$PROD_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$PROD_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$PROD_VAULT_TOKEN thiagolocatelli/spring-petclinic:$DOCKER_IMAGE_TAG
+      - docker run -d --name $DOCKER_CONTAINER_NAME -e VIRTUAL_PORT=8080 -e VIRTUAL_HOST=$DOCKER_CONTAINER_NAME.thiagolocatelli.com -e SPRING_CLOUD_CONFIG_URI=$PROD_CONFIG_SERVER_URL -e SPRING_CLOUD_VAULT_URI=$PROD_VAULT_URL -e SPRING_CLOUD_VAULT_TOKEN=$PROD_VAULT_TOKEN ${{CF_REPO_OWNER}}/$ARTIFACT_ID:$DOCKER_IMAGE_TAG
     when:
       steps:
         - name: waitForInputBeforeProduction
           on:
             - approved
-            
+
   slackNotifyProd:
     title: Notifiy Slack '#CICD'
     image: tutum/curl
@@ -282,4 +306,4 @@ steps:
     when:
       condition:
         all:
-          destroyProdEnvNowFinished: destroyProdEnvNow.result == 'success'            
+          destroyProdEnvNowFinished: destroyProdEnvNow.result == 'success'       
